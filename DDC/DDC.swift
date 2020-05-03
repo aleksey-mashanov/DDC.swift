@@ -177,7 +177,6 @@ public class DDC {
   static var dispatchGroups: [CGDirectDisplayID: (DispatchQueue, DispatchGroup)] = [:]
   static var framebufferDispatchGroups: [io_service_t: (DispatchQueue, DispatchGroup)] = [:]
 
-  let displayId: CGDirectDisplayID
   let framebuffer: io_service_t
   let replyTransactionType: IOOptionBits
   var enabled: Bool = false
@@ -186,13 +185,7 @@ public class DDC {
     assert(IOObjectRelease(self.framebuffer) == KERN_SUCCESS)
   }
 
-  public init?(for displayId: CGDirectDisplayID, withReplyTransactionType replyTransactionType: IOOptionBits? = nil) {
-    self.displayId = displayId
-
-    guard let framebuffer = DDC.ioFramebufferPortFromDisplayId(displayId: displayId) else {
-      return nil
-    }
-
+  public init?(consumingFramebuffer framebuffer: io_service_t, withReplyTransactionType replyTransactionType: IOOptionBits? = nil) {
     self.framebuffer = framebuffer
 
     if let replyTransactionType = replyTransactionType {
@@ -200,9 +193,23 @@ public class DDC {
     } else if let replyTransactionType = DDC.supportedTransactionType() {
       self.replyTransactionType = replyTransactionType
     } else {
-      os_log("No supported reply transaction type found for display with ID %u.", type: .error, displayId)
+      os_log("No supported reply transaction type found for framebuffer with ID %u.", type: .error, framebuffer)
+      IOObjectRelease(framebuffer)
       return nil
     }
+  }
+
+  public convenience init?(forFramebuffer framebuffer: io_service_t, withReplyTransactionType replyTransactionType: IOOptionBits? = nil) {
+    IOObjectRetain(framebuffer)
+    self.init(consumingFramebuffer: framebuffer, withReplyTransactionType: replyTransactionType)
+  }
+
+  public convenience init?(for displayId: CGDirectDisplayID, withReplyTransactionType replyTransactionType: IOOptionBits? = nil) {
+    guard let framebuffer = DDC.ioFramebufferPortFromDisplayId(displayId: displayId) else {
+      return nil
+    }
+
+    self.init(consumingFramebuffer: framebuffer, withReplyTransactionType: replyTransactionType)
   }
 
   public convenience init?(for screen: NSScreen, withReplyTransactionType replyTransactionType: IOOptionBits? = nil) {
@@ -595,22 +602,14 @@ public class DDC {
   }
 
   public func edid() -> EDID? {
-    guard let servicePort = DDC.servicePort(from: displayId) else {
-      return nil
-    }
-
-    defer {
-      assert(IOObjectRelease(servicePort) == KERN_SUCCESS)
-    }
-
-    let dict = IODisplayCreateInfoDictionary(servicePort, IOOptionBits(kIODisplayOnlyPreferredName)).takeRetainedValue() as NSDictionary
+    let dict = IODisplayCreateInfoDictionary(self.framebuffer, IOOptionBits(kIODisplayOnlyPreferredName)).takeRetainedValue() as NSDictionary
 
     if let displayEDID = dict["IODisplayEDIDOriginal"] as? Data {
       let bytes = [UInt8](displayEDID)
       return EDID(data: bytes)
     }
 
-    os_log("No EDID entry found for display with ID %u.", type: .error, self.displayId)
+    os_log("No EDID entry found for framebuffer with ID %u.", type: .error, self.framebuffer)
     return nil
   }
 
@@ -639,7 +638,7 @@ public class DDC {
     }
 
     guard let edidData = receiveBytes(128, 0) else {
-      os_log("Failed receiving EDID for display with ID %u.", type: .error, self.displayId)
+      os_log("Failed receiving EDID for framebuffer with ID %u.", type: .error, self.framebuffer)
       return nil
     }
 
@@ -647,7 +646,7 @@ public class DDC {
 
     if extensions > 0 {
       guard let extensionData = receiveBytes(128 * extensions, 128) else {
-        os_log("Failed receiving EDID extensions for display with ID %u.", type: .error, self.displayId)
+        os_log("Failed receiving EDID extensions for framebuffer with ID %u.", type: .error, self.framebuffer)
         return nil
       }
 
